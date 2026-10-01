@@ -310,6 +310,7 @@ const char INDEX_HTML[] PROGMEM = R"HTMLDELIM(
     <div class="presets">
       <span class="pl" data-i18n="presets.label">Quick presets</span>
       <button class="chip" data-preset="MyWhoosh">MyWhoosh</button>
+      <button class="chip" data-preset="MyWhooshClickV2">MyWhoosh · Click V2</button>
       <button class="chip" data-preset="Zwift">Zwift</button>
     </div>
     <div id="groups"></div>
@@ -454,6 +455,17 @@ const TILES = [["mapping",ICONS.mapping],["history",ICONS.history],["devices",IC
 const PRESETS = {
   MyWhoosh: {SHFT_UP_L_BTN:"i",SHFT_DN_L_BTN:"k",SHFT_UP_R_BTN:"i",SHFT_DN_R_BTN:"k",
     LEFT_BTN:"LEFT",RIGHT_BTN:"RIGHT",UP_BTN:"UP",DOWN_BTN:"DOWN"},
+  // Click V2: je Seite nur EIN Paddle, beide melden "UP" (links=Bit 8, rechts=Bit 12).
+  // SRAM-Logik: links leichter, rechts schwerer.
+  // Shift-Tasten getestet (MyWhoosh): "i" macht es LEICHTER, "k" SCHWERER - die
+  // MyWhoosh-Doku nennt I = Shift Up, das stimmt hier nicht. Daher links=i (leichter),
+  // rechts=k (schwerer, "+" wie bei SRAM).
+  // Links: Pfeiltasten (Lenken/Navigation). Rechts: nur Tasten, die MyWhoosh
+  // wirklich kennt (Emotes 1-7, U = minimale UI): Y=Minimal UI, Z=Wave,
+  // A=Thumbs up, B=Fist bump.
+  MyWhooshClickV2: {SHFT_UP_L_BTN:"i",SHFT_UP_R_BTN:"k",
+    LEFT_BTN:"LEFT",RIGHT_BTN:"RIGHT",UP_BTN:"UP",DOWN_BTN:"DOWN",
+    Y_BTN:"u",Z_BTN:"2",A_BTN:"7",B_BTN:"3"},
   Zwift: {SHFT_UP_L_BTN:"UP",SHFT_DN_L_BTN:"DOWN",SHFT_UP_R_BTN:"UP",SHFT_DN_R_BTN:"DOWN",
     LEFT_BTN:"LEFT",RIGHT_BTN:"RIGHT",UP_BTN:"UP",DOWN_BTN:"DOWN",A_BTN:"SPACE"}
 };

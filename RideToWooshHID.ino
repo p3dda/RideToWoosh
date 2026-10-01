@@ -69,6 +69,25 @@ static const char* RIDEON_MAGIC = "RideOn";   // 6 Bytes, ASCII
 
 static const uint8_t MSG_ID_KEYPAD = 0x23;    // Button-Status-Nachricht
 
+// Zwift-GATT (Service 0xFC82, gilt für Ride / Click / Click V2 / Play):
+//   ...0002 notify         async: Button-Daten (0x23 ...)
+//   ...0003 write-no-resp  Control Point: hier geht "RideOn" hin
+//   ...0004 indicate       Sync-Antworten auf den Handshake
+static const char* ZW_UUID_ASYNC = "00000002-19ca-4651-86e5-fa29dcdd09d1";
+static const char* ZW_UUID_CTRL  = "00000003-19ca-4651-86e5-fa29dcdd09d1";
+static const char* ZW_UUID_SYNC  = "00000004-19ca-4651-86e5-fa29dcdd09d1";
+
+// BLE-Debug (Handshake, Rohdaten). Auf 0 setzen für ruhige Logs.
+#define BLE_DEBUG 0
+#define HANDSHAKE_TIMEOUT_MS 5000   // so lange ohne 0x23-Daten -> Warnung + Diagnose
+
+static void hexDump(const char* tag, const uint8_t* d, size_t len){
+  Serial.printf("[BLE] %s (%u B):", tag, (unsigned)len);
+  for(size_t i=0;i<len && i<48;i++) Serial.printf(" %02x", d[i]);
+  if(len>48) Serial.print(" ...");
+  Serial.println();
+}
+
 // --------------------------------------------------------------------
 //  Button-Tabelle  (muss exakt zur Reihenfolge im Web-UI passen)
 // --------------------------------------------------------------------
@@ -121,6 +140,9 @@ uint32_t          prevPressedMask = 0;
 NimBLEClient*           rideClient   = nullptr;
 NimBLERemoteCharacteristic* rideMeasure = nullptr; // notify (0x23 kommt hier)
 NimBLERemoteCharacteristic* rideControl = nullptr; // write (RideOn)
+NimBLERemoteCharacteristic* rideSync    = nullptr; // indicate (Handshake-Antwort)
+volatile uint32_t rideRxCount   = 0;      // empfangene Notifications (Debug)
+volatile uint32_t rideConnectMs = 0;      // Zeitpunkt des Handshakes
 volatile bool     rideConnected = false;
 volatile bool     wantReconnect = false;
 volatile bool     stateDirty    = false;   // Statuswechsel aus BLE-Task -> Broadcast in loop()
@@ -328,7 +350,28 @@ void parseAnalog(const uint8_t* d, size_t len, int8_t out[4]){
 // --------------------------------------------------------------------
 //  Notification-Callback der Ride
 // --------------------------------------------------------------------
+void onRideSync(NimBLERemoteCharacteristic* c, uint8_t* data, size_t len, bool isNotify){
+  hexDump("Sync-Antwort (0004)", data, len);   // beginnt mit "RideOn" (52 69 64 65 4f 6e)
+}
+
 void onRideNotify(NimBLERemoteCharacteristic* c, uint8_t* data, size_t len, bool isNotify){
+  uint32_t n = ++rideRxCount;
+#if BLE_DEBUG
+  // Nach Message-ID einordnen. 0x23 = Button-Status (bei jedem Druck/Loslassen,
+  // daher immer loggen); alles andere sind Status-/Info-Pakete (Seriennummer,
+  // Batterie ...) -> nur die ersten 20 loggen, sonst Log-Flut.
+  uint32_t dummy;
+  bool ok = parseButtonMap(data, len, dummy);
+  if(len>0 && data[0]==MSG_ID_KEYPAD){
+    hexDump(ok ? "BUTTONS 0x23" : "BUTTONS 0x23 (nicht parsebar)", data, len);
+  }else if(n<=20){
+    const char* kind = len==0 ? "leer" :
+      data[0]==0x19 ? "0x19 (Batterie?)" :
+      data[0]==0x2a ? "0x2a (Geraeteinfo?)" : "andere ID";
+    Serial.printf("[BLE] Status-Paket #%u: %s\n", (unsigned)n, kind);
+    hexDump("  Daten", data, len);
+  }
+#endif
   uint32_t raw;
   if(!parseButtonMap(data, len, raw)) return;
   // Ride: 0 == gedrückt -> invertieren; nur digitale Bits (0..23).
@@ -533,9 +576,16 @@ class ScanCB : public NimBLEScanCallbacks {
 
 class ClientCB : public NimBLEClientCallbacks {
   void onConnect(NimBLEClient* c) override { Serial.println("[BLE] verbunden."); }
+  void onConnectFail(NimBLEClient* c, int reason) override {
+    Serial.printf("[BLE] Verbindungsaufbau fehlgeschlagen (reason %d)\n", reason);
+  }
+  void onAuthenticationComplete(NimBLEConnInfo& info) override {
+    Serial.printf("[BLE] Pairing/Verschlüsselung: encrypted=%d authenticated=%d bonded=%d\n",
+                  info.isEncrypted(), info.isAuthenticated(), info.isBonded());
+  }
   void onDisconnect(NimBLEClient* c, int reason) override {
     Serial.printf("[BLE] getrennt (reason %d). Scanne neu...\n", reason);
-    rideConnected=false; rideMeasure=nullptr; rideControl=nullptr;
+    rideConnected=false; rideMeasure=nullptr; rideControl=nullptr; rideSync=nullptr;
     if(mapMutex) xSemaphoreTake(mapMutex, portMAX_DELAY);
     rideDevName="";
     if(mapMutex) xSemaphoreGive(mapMutex);
@@ -564,6 +614,23 @@ bool findZwiftChars(NimBLEClient* c){
       if(!indicateCh && ch->canIndicate())                           indicateCh = ch;
       if(!writeCh    && (ch->canWrite()||ch->canWriteNoResponse()))  writeCh    = ch;
     }
+  }
+  // Bevorzugt die bekannten Zwift-UUIDs (Service 0xFC82). Die generische Suche
+  // ("erste schreibbare Char") greift sonst GAP 0x2a00 (Device Name) und der
+  // RideOn-Handshake landet im Nirwana -> Gerät sendet nie Button-Daten.
+  NimBLERemoteService* zsvc = c->getService(NimBLEUUID((uint16_t)0xFC82));
+  if(zsvc){
+    NimBLERemoteCharacteristic* a = zsvc->getCharacteristic(NimBLEUUID(ZW_UUID_ASYNC));
+    NimBLERemoteCharacteristic* w = zsvc->getCharacteristic(NimBLEUUID(ZW_UUID_CTRL));
+    NimBLERemoteCharacteristic* y = zsvc->getCharacteristic(NimBLEUUID(ZW_UUID_SYNC));
+    Serial.printf("[BLE] Zwift-Service 0xFC82: async=%s ctrl=%s sync=%s\n",
+                  a?"ok":"FEHLT", w?"ok":"FEHLT", y?"ok":"FEHLT");
+    if(a) notifyCh = a;
+    if(w) writeCh  = w;
+    rideSync = y;
+  }else{
+    Serial.println("[BLE] WARNUNG: Service 0xFC82 nicht gefunden — Fallback auf generische Auswahl (unzuverlässig).");
+    rideSync = nullptr;
   }
   // Button-Daten (0x23) kommen per Notify (ASYNC); Indicate nur als Fallback.
   rideMeasure = notifyCh ? notifyCh : indicateCh;
@@ -597,11 +664,23 @@ bool connectRide(){
     delete dev;
     return false;
   }
-  // RideOn-Handshake: "RideOn" schreiben — mit Response nur, wenn unterstützt.
-  rideControl->writeValue((const uint8_t*)RIDEON_MAGIC, 6, rideControl->canWrite());
-  delay(40);
-  // Abonnieren: Notify (true) bzw. Indicate (false), je nach Characteristic
-  rideMeasure->subscribe(rideMeasure->canNotify(), onRideNotify);
+  rideRxCount = 0;
+  Serial.printf("[BLE] MTU=%u\n", (unsigned)rideClient->getMTU());
+  // 1) Zuerst die Antwortkanäle abonnieren (Sync-Indicate + Button-Notify),
+  //    damit keine Antwort auf den Handshake verloren geht.
+  if(rideSync){
+    bool ok = rideSync->subscribe(rideSync->canNotify(), onRideSync);
+    Serial.printf("[BLE] subscribe Sync (0004): %s\n", ok?"ok":"FEHLER");
+  }
+  bool subOk = rideMeasure->subscribe(rideMeasure->canNotify(), onRideNotify);
+  Serial.printf("[BLE] subscribe Measure (0002): %s\n", subOk?"ok":"FEHLER");
+  delay(100);
+  // 2) RideOn-Handshake an den Control Point — mit Response nur, wenn unterstützt.
+  bool useRsp = rideControl->canWrite();
+  bool wOk = rideControl->writeValue((const uint8_t*)RIDEON_MAGIC, 6, useRsp);
+  Serial.printf("[BLE] RideOn -> %s (%s): %s\n", rideControl->getUUID().toString().c_str(),
+                useRsp?"write":"write-no-response", wOk?"ok":"FEHLER");
+  rideConnectMs = millis();
   // Gerätenamen + Adresse für die UI-Anzeige merken (String -> unter Mutex)
   String nm = dev->getName().c_str();
   if(nm.isEmpty()) nm = "Zwift Ride";
@@ -697,6 +776,20 @@ void loop(){
     broadcastState();          // WS-Send nur aus loop()-Kontext
   }
   handlePresses();
+
+#if BLE_DEBUG
+  // Handshake-Watchdog: verbunden, aber keine Daten -> Diagnose ausgeben.
+  static bool warned=false;
+  if(!rideConnected) warned=false;
+  else if(!warned && rideRxCount==0 && millis()-rideConnectMs>HANDSHAKE_TIMEOUT_MS){
+    warned=true;
+    Serial.printf("[BLE] WARNUNG: %u ms nach RideOn keine Daten. connected=%d sync=%s\n",
+                  (unsigned)HANDSHAKE_TIMEOUT_MS, rideClient?rideClient->isConnected():0,
+                  rideSync?"vorhanden":"fehlt");
+    Serial.println("[BLE]   -> Keine 0004-Antwort: Gerät verlangt evtl. anderen/verschlüsselten Handshake (Click V2).");
+    Serial.println("[BLE]   -> Zwift-App/anderes Gerät noch mit der Click verbunden? Click erlaubt nur 1 Verbindung.");
+  }
+#endif
 
   // Statusupdate ~2x/s (HID-Connect kann sich ändern)
   if(millis()-lastState>500){

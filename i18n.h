@@ -53,6 +53,13 @@ const char LANG_EN_JSON[] PROGMEM = R"I18N(
     "remap": "Open Key Mapping and assign your keys",
     "done": "All set — you're ready to ride."
   },
+  "led": {
+    "t": "Status LED",
+    "on": "On",
+    "off": "Off",
+    "br": "Brightness",
+    "hint": "Green: Ride + keyboard connected · Yellow blink: searching Ride · Blue blink: pair the keyboard · Red blink: nothing connected · White flash: key press · Double red blink: battery low. Saved immediately on the device."
+  },
   "presets": {
     "label": "Quick presets",
     "hint": "A starting point — review and Save."
@@ -149,6 +156,13 @@ const char LANG_DE_JSON[] PROGMEM = R"I18N(
     "ride": "Ride einschalten (vorher in der Zwift-App trennen)",
     "remap": "Tastenbelegung öffnen und Tasten zuweisen",
     "done": "Alles bereit — auf geht's."
+  },
+  "led": {
+    "t": "Status-LED",
+    "on": "An",
+    "off": "Aus",
+    "br": "Helligkeit",
+    "hint": "Grün: Ride + Tastatur verbunden · Gelb blinkt: Ride wird gesucht · Blau blinkt: Tastatur koppeln · Rot blinkt: nichts verbunden · Weißer Blitz: Tastendruck · Rotes Doppelblinken: Akku schwach. Wird sofort auf dem Gerät gespeichert."
   },
   "presets": {
     "label": "Schnell-Presets",

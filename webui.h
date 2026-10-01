@@ -16,7 +16,9 @@
 //   ESP -> Browser: {"t":"state","ride":bool,"hid":bool,"ip":"...","rideDev":"..","hidDev":"..","bat":0-100|-1}
 //                   {"t":"btn","mask":<uint32>,"names":[...]}
 //                   {"t":"map","map":{"LEFT_BTN":"a", ...}}
+//                   {"t":"led","avail":bool,"on":bool,"br":1-100}
 //   Browser -> ESP: {"t":"setmap","btn":"..","key":".."}  {"t":"getmap"}  {"t":"save"}
+//                   {"t":"setled","on":"0|1","br":"1-100"}   (wird sofort gespeichert)
 #pragma once
 #include <Arduino.h>
 
@@ -220,6 +222,10 @@ const char INDEX_HTML[] PROGMEM = R"HTMLDELIM(
   .card .cl{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:12px}
   .card p{margin:0;font-size:13px;color:var(--muted);line-height:1.6}
   .card .note{font-size:11px;color:var(--faint);margin-top:10px}
+  .card[hidden]{display:none}
+  .card .rng{display:flex;align-items:center;gap:12px;margin-top:14px}
+  .card .rng input{flex:1;accent-color:var(--o)}
+  .card .rng output{min-width:42px;text-align:right;font-size:13px;color:var(--muted)}
 
   /* controller map (button/paddle styles live inside the SVG's own <style>) */
   .ctrlwrap{border:1px solid var(--line);border-radius:16px;background:#0e1622;box-shadow:var(--raise);padding:16px}
@@ -358,6 +364,19 @@ const char INDEX_HTML[] PROGMEM = R"HTMLDELIM(
         <button data-lang="de" aria-pressed="false">Deutsch</button>
       </div>
       <div class="note" data-i18n="settings_langHint"></div>
+    </div>
+    <div class="card" id="ledCard" hidden>
+      <div class="cl" data-i18n="led.t">Status LED</div>
+      <div class="seg" id="ledSeg" role="group" aria-label="Status LED" data-i18n-aria="led.t">
+        <button data-led="1" aria-pressed="true" data-i18n="led.on">On</button>
+        <button data-led="0" aria-pressed="false" data-i18n="led.off">Off</button>
+      </div>
+      <div class="rng">
+        <span class="cl" style="margin:0" data-i18n="led.br">Brightness</span>
+        <input type="range" id="ledBr" min="1" max="100" value="20" aria-label="Brightness" data-i18n-aria="led.br">
+        <output id="ledBrVal">20 %</output>
+      </div>
+      <div class="note" data-i18n="led.hint"></div>
     </div>
     <div class="card">
       <div class="cl" data-i18n="settings_about">About</div>
@@ -667,15 +686,26 @@ function connect(){
   ws.onmessage=e=>{ let m; try{ m=JSON.parse(e.data); }catch(_){ return; }
     if(m.t==="state"){ lastState={ride:!!m.ride,hid:!!m.hid,rideDev:m.rideDev||"",hidDev:m.hidDev||"",bat:(typeof m.bat==="number"?m.bat:-1)}; renderState(); }
     else if(m.t==="btn"){ flashButtons(m.names||[]); }
-    else if(m.t==="map"){ applyMap(m.map||{}); setDirty(false); } };
+    else if(m.t==="map"){ applyMap(m.map||{}); setDirty(false); }
+    else if(m.t==="led"){ renderLed(m); } };
   ws.onclose=()=>{ lastState={ride:false,hid:false,rideDev:"",hidDev:"",bat:-1}; renderState();
     $("banner").classList.add("show"); setTimeout(connect,1200); };
 }
+
+// ---------- status LED (settings) ----------
+function renderLed(m){
+  $("ledCard").hidden=!m.avail;
+  document.querySelectorAll("#ledSeg [data-led]").forEach(b=>b.setAttribute("aria-pressed",(b.dataset.led==="1")===!!m.on?"true":"false"));
+  if(document.activeElement!==$("ledBr")){ $("ledBr").value=m.br; $("ledBrVal").textContent=m.br+" %"; }
+}
+$("ledBr").addEventListener("input",e=>{ $("ledBrVal").textContent=e.target.value+" %"; });
+$("ledBr").addEventListener("change",e=>send({t:"setled",br:String(e.target.value)}));
 
 // ---------- events ----------
 document.addEventListener("click",e=>{
   const go=e.target.closest("[data-go]"); if(go){ showView(go.dataset.go); return; }
   const lg=e.target.closest("[data-lang]"); if(lg){ loadLang(lg.dataset.lang); return; }
+  const ld=e.target.closest("[data-led]"); if(ld){ send({t:"setled",on:ld.dataset.led}); return; }
   const pr=e.target.closest("[data-preset]"); if(pr){ applyPreset(pr.dataset.preset); return; }
   if(e.target===$("picker")) closePicker();
 });

@@ -59,6 +59,23 @@
 // Skala (Arduino-ESP32): WIFI_POWER_19_5dBm (max) · 17 · 15 · 13 · 11 · 8_5 · 7 · 5 · 2 · MINUS_1dBm
 #define AP_TX_POWER  WIFI_POWER_19_5dBm
 
+// Status-LED (adressierbare RGB-LED, WS2812/NeoPixel). Hardware-Frage = Build-Zeit:
+//   • Dev-Boards mit Onboard-RGB-LED (z.B. ESP32-S3-DevKitC-1 / N16R8, GPIO 48):
+//     wird automatisch über RGB_BUILTIN erkannt.
+//   • Andere Pin / externe WS2812-LED:  -DSTATUS_LED_PIN=<gpio>  (platformio.ini).
+//   • Abschalten/Feature entfernen:     -DSTATUS_LED_PIN=-1
+// An/Aus + Helligkeit stellt man zur Laufzeit im Web-UI (Settings) ein, nicht hier.
+// Standard nach dem Flashen: AN bei 20 % Helligkeit (sofern eine LED vorhanden ist).
+#ifndef STATUS_LED_PIN
+#  ifdef RGB_BUILTIN
+#    define STATUS_LED_PIN RGB_BUILTIN
+#  else
+#    define STATUS_LED_PIN -1
+#  endif
+#endif
+static const int  LED_PIN     = STATUS_LED_PIN;
+static const bool HAS_LED     = (LED_PIN >= 0);
+
 // Zwift RideOn-Handshake + GATT (Zwift Ride, unverschlüsselt)
 static const char* RIDEON_MAGIC = "RideOn";   // 6 Bytes, ASCII
 
@@ -148,6 +165,9 @@ volatile uint32_t rideRxCount   = 0;      // empfangene Notifications (Debug)
 volatile uint32_t rideConnectMs = 0;      // Zeitpunkt des Handshakes
 volatile bool     rideConnected = false;
 volatile bool     wantReconnect = false;
+bool              ledOn         = true;     // Web-UI-Schalter (persistent, Default an)
+uint8_t           ledBright     = 20;       // 1..100 %
+volatile uint32_t ledFlashUntil = 0;        // weißer Blitz bei Tastendruck (millis)
 volatile bool     stateDirty    = false;   // Statuswechsel aus BLE-Task -> Broadcast in loop()
 NimBLEAdvertisedDevice* foundRide = nullptr;
 String            rideDevName  = "";        // Name+MAC der verbundenen Ride (fürs UI)
@@ -157,6 +177,7 @@ const char*       cfgPartInUse = nullptr;    // "cfg" wenn vorhanden, sonst NULL
 
 // Forward-Deklarationen
 void broadcastButtons(uint32_t mask);
+void sendLedState(AsyncWebSocketClient* client=nullptr);
 void broadcastState();
 void sendMapping(AsyncWebSocketClient* client=nullptr);
 
@@ -240,6 +261,62 @@ void loadMapping(){
     keyMap[ maskToIndex(0x01000) ] = "i";      // Schalt rechts hoch
     keyMap[ maskToIndex(0x02000) ] = "k";      // Schalt rechts runter
   }
+}
+
+// --------------------------------------------------------------------
+//  Status-LED
+// --------------------------------------------------------------------
+void loadLedSettings(){
+  if(!HAS_LED) return;
+  prefs.begin("zrhid", false, cfgPartInUse);
+  ledOn     = prefs.getBool("led_on", true);
+  ledBright = prefs.getUChar("led_br", 20);
+  prefs.end();
+  if(ledBright<1) ledBright=1; if(ledBright>100) ledBright=100;
+}
+void saveLedSettings(){
+  prefs.begin("zrhid", false, cfgPartInUse);
+  prefs.putBool("led_on", ledOn);
+  prefs.putUChar("led_br", ledBright);
+  prefs.end();
+}
+void sendLedState(AsyncWebSocketClient* client){
+  String m = String("{\"t\":\"led\",\"avail\":") + (HAS_LED?"true":"false")
+           + ",\"on\":" + (ledOn?"true":"false") + ",\"br\":" + String((int)ledBright) + "}";
+  if(client) client->text(m); else wsLive.textAll(m);
+}
+
+// Zustand -> Farbe. Priorität: Tastendruck-Blitz > Akku-leer-Blinken > Verbindungsstatus.
+//   grün           Ride + Tastatur verbunden
+//   gelb blinkt    Tastatur gekoppelt, Ride wird gesucht
+//   blau blinkt    Ride verbunden, Tastatur noch nicht gekoppelt
+//   rot blinkt     nichts verbunden
+//   weißer Blitz   Tastendruck        rotes Doppelblinken: Akku <= 15 %
+void updateStatusLed(){
+  if(!HAS_LED) return;
+  static uint32_t last=0; static int32_t lastRGB=-2;   // -2 = noch nie geschrieben
+  uint32_t t = millis();
+  if(t-last < 25) return;
+  last = t;
+
+  uint8_t r=0,g=0,b=0;
+  if(ledOn){
+    bool ride=rideConnected, hid=bleKeyboard.isConnected();
+    bool blink = (t % 1000) < 200;                       // 200 ms an, 800 ms aus
+    int  bat   = rideBattery;
+    uint32_t ph = t % 5000;                              // Akku-Warnung alle 5 s
+    bool lowBlink = ride && bat>=0 && bat<=15 && (ph<150 || (ph>=300 && ph<450));
+    if((int32_t)(ledFlashUntil - t) > 0)       { r=255; g=255; b=255; }
+    else if(lowBlink)                          { r=255; }
+    else if(ride && hid)                       { g=255; }
+    else if(!ride && hid)                      { if(blink){ r=255; g=160; } }
+    else if(ride && !hid)                      { if(blink){ b=255; } }
+    else                                       { if(blink){ r=255; } }
+    // Helligkeit skalieren (WS2812 sind sehr hell)
+    r = (uint16_t)r*ledBright/100; g = (uint16_t)g*ledBright/100; b = (uint16_t)b*ledBright/100;
+  }
+  int32_t rgb = (r<<16)|(g<<8)|b;
+  if(rgb != lastRGB){ lastRGB = rgb; neopixelWrite(LED_PIN, r, g, b); }   // nur bei Änderung (RMT)
 }
 
 void saveMapping(){
@@ -392,6 +469,7 @@ void handlePresses(){
   uint32_t now  = lastPressedMask;
   uint32_t rising = now & ~prevPressedMask;   // neu gedrückt
   if(rising){
+    ledFlashUntil = millis() + 80;
     for(size_t k=0;k<N_BTN;k++){
       if(rising & BUTTONS[k].mask){
         int bit=maskToIndex(BUTTONS[k].mask);
@@ -537,6 +615,7 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
   if(type==WS_EVT_CONNECT){
     broadcastState();
     sendMapping(client);
+    sendLedState(client);
   }else if(type==WS_EVT_DATA){
     AwsFrameInfo* info=(AwsFrameInfo*)arg;
     if(!(info->final && info->index==0 && info->len==len)) return;
@@ -552,6 +631,13 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
     String t=field("t");
     if(t=="getmap"){ sendMapping(client); }
     else if(t=="save"){ saveMapping(); }
+    else if(t=="setled" && HAS_LED){
+      String on=field("on"), br=field("br");
+      if(on.length()) ledOn = (on=="1");
+      if(br.length()){ int v=br.toInt(); ledBright = v<1?1:(v>100?100:v); }
+      saveLedSettings();
+      sendLedState();
+    }
     else if(t=="setmap"){
       setKeyFor(field("btn"), field("key"));
     }
@@ -729,6 +815,7 @@ void setup(){
   mapMutex = xSemaphoreCreateMutex();   // schützt keyMap[] (Loop vs. WebServer-Task)
   initConfigStore();                    // getrennte 'cfg'-NVS-Partition vorbereiten
   loadMapping();
+  loadLedSettings();
 
   // 1) BLE-HID-Tastatur starten (Peripheral-Rolle)
   bleKeyboard.begin();
@@ -799,6 +886,7 @@ void loop(){
     broadcastState();          // WS-Send nur aus loop()-Kontext
   }
   handlePresses();
+  updateStatusLed();
 
 #if BLE_DEBUG
   // Handshake-Watchdog: verbunden, aber keine Daten -> Diagnose ausgeben.

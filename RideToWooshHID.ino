@@ -98,6 +98,14 @@ static const char* ZW_UUID_SYNC  = "00000004-19ca-4651-86e5-fa29dcdd09d1";
 #define BLE_DEBUG 0
 #define HANDSHAKE_TIMEOUT_MS 5000   // so lange ohne 0x23-Daten -> Warnung + Diagnose
 
+// Click-V2-Paar: Nur EINE der beiden Clicks liefert nach "RideOn" Daten (die
+// linke, sie leitet die rechte weiter). Die andere bleibt stumm und trennt von
+// selbst, schickt aber (wenn Tasten gedrückt werden) trotzdem 0x23-Pakete. Als
+// Lebenszeichen zählen deshalb nur Status-Pakete (ID != 0x23). Kommt nach RideOn
+// so lange keines, gilt die Gegenstelle als "falsche" Click: trennen, Adresse kurz sperren, die andere finden lassen.
+#define SILENT_PEER_MS   4000
+#define SILENT_BAN_MS   20000
+
 static void hexDump(const char* tag, const uint8_t* d, size_t len){
   // Zeile erst in Puffer bauen, dann EIN Serial-Write (BLE-Task und loop()
   // schreiben sonst ineinander).
@@ -162,7 +170,10 @@ NimBLERemoteCharacteristic* rideControl = nullptr; // write (RideOn)
 NimBLERemoteCharacteristic* rideSync    = nullptr; // indicate (Handshake-Antwort)
 volatile int      rideBattery   = -1;     // Akkustand der Click/Ride in % (-1 = unbekannt)
 volatile uint32_t rideRxCount   = 0;      // empfangene Notifications (Debug)
+volatile uint32_t rideStatusRx  = 0;      // davon Status-Pakete (ID != 0x23): Lebenszeichen der "richtigen" Click
 volatile uint32_t rideConnectMs = 0;      // Zeitpunkt des Handshakes
+char              banAddr[20]   = "";     // gesperrte (stumme) Click, Adresse als Text
+volatile uint32_t banUntil      = 0;      // millis() bis zu dem banAddr beim Scan ignoriert wird
 volatile bool     rideConnected = false;
 volatile bool     wantReconnect = false;
 bool              ledOn         = true;     // Web-UI-Schalter (persistent, Default an)
@@ -436,6 +447,7 @@ void onRideSync(NimBLERemoteCharacteristic* c, uint8_t* data, size_t len, bool i
 
 void onRideNotify(NimBLERemoteCharacteristic* c, uint8_t* data, size_t len, bool isNotify){
   uint32_t n = ++rideRxCount;
+  if(len>0 && data[0]!=MSG_ID_KEYPAD) rideStatusRx++;
 #if BLE_DEBUG
   // Nach Message-ID einordnen. 0x23 = Button-Status (bei jedem Druck/Loslassen,
   // daher immer loggen); alles andere sind Status-/Info-Pakete (Seriennummer,
@@ -650,6 +662,8 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 class ScanCB : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* dev) override {
     String name = dev->getName().c_str();
+    if(banUntil && (int32_t)(banUntil - millis()) > 0 &&
+       strcasecmp(dev->getAddress().toString().c_str(), banAddr)==0) return;   // stumme Click überspringen
     // Ride heißt im BLE "Zwift SF2" (NICHT "Zwift Ride") -> breit auf "Zwift" matchen.
     if(name.indexOf("Zwift")>=0){
       Serial.printf("[BLE] Ride gefunden: '%s' (%s)\n",
@@ -772,7 +786,7 @@ bool connectRide(){
     delete dev;
     return false;
   }
-  rideRxCount = 0;
+  rideRxCount = 0; rideStatusRx = 0;
   Serial.printf("[BLE] MTU=%u\n", (unsigned)rideClient->getMTU());
   // 1) Zuerst die Antwortkanäle abonnieren (Sync-Indicate + Button-Notify),
   //    damit keine Antwort auf den Handshake verloren geht.
@@ -887,6 +901,23 @@ void loop(){
   }
   handlePresses();
   updateStatusLed();
+
+  // Stumme Gegenstelle (falsche Click des Paares): trennen und die andere suchen.
+  if(rideConnected && rideStatusRx==0 && millis()-rideConnectMs > SILENT_PEER_MS && rideClient){
+    String a = rideClient->getPeerAddress().toString().c_str();
+    Serial.printf("[BLE] %s sendet nichts (vermutlich die weitergeleitete Click) — trenne, suche die andere.\n", a.c_str());
+    strncpy(banAddr, a.c_str(), sizeof banAddr - 1); banAddr[sizeof banAddr - 1] = 0;
+    banUntil = millis() + SILENT_BAN_MS; if(!banUntil) banUntil = 1;
+    rideStatusRx = 1;           // nur einmal auslösen, bis zum nächsten Connect
+    rideClient->disconnect();   // onDisconnect() startet den Scan neu
+  }
+
+  // Sperre abgelaufen: Scan neu starten, sonst meldet der Controller die Click
+  // (Duplikatfilter) nie wieder, falls sie die einzige erreichbare ist.
+  if(banUntil && (int32_t)(millis() - banUntil) >= 0){
+    banUntil = 0;
+    if(!rideConnected && !wantReconnect) NimBLEDevice::getScan()->start(0, false, true);
+  }
 
 #if BLE_DEBUG
   // Handshake-Watchdog: verbunden, aber keine Daten -> Diagnose ausgeben.

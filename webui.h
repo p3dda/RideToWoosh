@@ -13,7 +13,7 @@
 // an die Firmware (setmap), persistent erst per "Speichern" -> "Unsaved"-Anzeige.
 //
 // WS-Protokoll (JSON):
-//   ESP -> Browser: {"t":"state","ride":bool,"hid":bool,"ip":"...","rideDev":"..","hidDev":".."}
+//   ESP -> Browser: {"t":"state","ride":bool,"hid":bool,"ip":"...","rideDev":"..","hidDev":"..","bat":0-100|-1}
 //                   {"t":"btn","mask":<uint32>,"names":[...]}
 //                   {"t":"map","map":{"LEFT_BTN":"a", ...}}
 //   Browser -> ESP: {"t":"setmap","btn":"..","key":".."}  {"t":"getmap"}  {"t":"save"}
@@ -477,7 +477,7 @@ const MIRROR = {SHFT_UP_L_BTN:"SU",SHFT_UP_R_BTN:"SU",SHFT_DN_L_BTN:"SD",SHFT_DN
 const $ = id => document.getElementById(id);
 let ws, mapping = {}, T = {}, dirty = false, pickerTarget = null;
 let LANG = localStorage.getItem("lang") || "en";
-let lastState = {ride:false,hid:false,rideDev:"",hidDev:""};
+let lastState = {ride:false,hid:false,rideDev:"",hidDev:"",bat:-1};
 let liveSet = new Set(), lastNames = [];
 
 const escHtml = s => String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -642,7 +642,7 @@ function renderState(){
   $("pIn").setAttribute("aria-label",(tp("conn.in")||"")+": "+(s.ride?conn:disc));
   $("pOut").setAttribute("aria-label",(tp("conn.out")||"")+": "+(s.hid?conn:disc));
   const iv=$("dvInVal"), ov=$("dvOutVal");
-  iv.textContent=s.ride?(s.rideDev||tp("conn.inFb")||""):disc; iv.classList.toggle("on",s.ride);
+  iv.textContent=s.ride?((s.rideDev||tp("conn.inFb")||"")+(s.bat>=0?" · "+s.bat+" %":"")):disc; iv.classList.toggle("on",s.ride);
   ov.textContent=s.hid?(s.hidDev||tp("conn.outFb")||""):disc; ov.classList.toggle("on",s.hid);
   // setup checklist (home) — show until both connected
   $("step-kbd").classList.toggle("done",s.hid);
@@ -665,10 +665,10 @@ function connect(){
   ws=new WebSocket("ws://"+location.hostname+"/ws");
   ws.onopen=()=>{ $("banner").classList.remove("show"); send({t:"getmap"}); };
   ws.onmessage=e=>{ let m; try{ m=JSON.parse(e.data); }catch(_){ return; }
-    if(m.t==="state"){ lastState={ride:!!m.ride,hid:!!m.hid,rideDev:m.rideDev||"",hidDev:m.hidDev||""}; renderState(); }
+    if(m.t==="state"){ lastState={ride:!!m.ride,hid:!!m.hid,rideDev:m.rideDev||"",hidDev:m.hidDev||"",bat:(typeof m.bat==="number"?m.bat:-1)}; renderState(); }
     else if(m.t==="btn"){ flashButtons(m.names||[]); }
     else if(m.t==="map"){ applyMap(m.map||{}); setDirty(false); } };
-  ws.onclose=()=>{ lastState={ride:false,hid:false,rideDev:"",hidDev:""}; renderState();
+  ws.onclose=()=>{ lastState={ride:false,hid:false,rideDev:"",hidDev:"",bat:-1}; renderState();
     $("banner").classList.add("show"); setTimeout(connect,1200); };
 }
 

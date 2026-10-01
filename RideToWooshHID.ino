@@ -82,10 +82,12 @@ static const char* ZW_UUID_SYNC  = "00000004-19ca-4651-86e5-fa29dcdd09d1";
 #define HANDSHAKE_TIMEOUT_MS 5000   // so lange ohne 0x23-Daten -> Warnung + Diagnose
 
 static void hexDump(const char* tag, const uint8_t* d, size_t len){
-  Serial.printf("[BLE] %s (%u B):", tag, (unsigned)len);
-  for(size_t i=0;i<len && i<48;i++) Serial.printf(" %02x", d[i]);
-  if(len>48) Serial.print(" ...");
-  Serial.println();
+  // Zeile erst in Puffer bauen, dann EIN Serial-Write (BLE-Task und loop()
+  // schreiben sonst ineinander).
+  char buf[256]; int n = snprintf(buf, sizeof buf, "[BLE] %s (%u B):", tag, (unsigned)len);
+  for(size_t i=0;i<len && i<48 && n<(int)sizeof buf-6;i++) n += snprintf(buf+n, sizeof buf-n, " %02x", d[i]);
+  if(len>48 && n<(int)sizeof buf-6) n += snprintf(buf+n, sizeof buf-n, " ...");
+  buf[n++]='\n'; Serial.write((const uint8_t*)buf, n);
 }
 
 // --------------------------------------------------------------------
@@ -141,6 +143,7 @@ NimBLEClient*           rideClient   = nullptr;
 NimBLERemoteCharacteristic* rideMeasure = nullptr; // notify (0x23 kommt hier)
 NimBLERemoteCharacteristic* rideControl = nullptr; // write (RideOn)
 NimBLERemoteCharacteristic* rideSync    = nullptr; // indicate (Handshake-Antwort)
+volatile int      rideBattery   = -1;     // Akkustand der Click/Ride in % (-1 = unbekannt)
 volatile uint32_t rideRxCount   = 0;      // empfangene Notifications (Debug)
 volatile uint32_t rideConnectMs = 0;      // Zeitpunkt des Handshakes
 volatile bool     rideConnected = false;
@@ -364,12 +367,9 @@ void onRideNotify(NimBLERemoteCharacteristic* c, uint8_t* data, size_t len, bool
   bool ok = parseButtonMap(data, len, dummy);
   if(len>0 && data[0]==MSG_ID_KEYPAD){
     hexDump(ok ? "BUTTONS 0x23" : "BUTTONS 0x23 (nicht parsebar)", data, len);
-  }else if(n<=20){
-    const char* kind = len==0 ? "leer" :
-      data[0]==0x19 ? "0x19 (Batterie?)" :
-      data[0]==0x2a ? "0x2a (Geraeteinfo?)" : "andere ID";
-    Serial.printf("[BLE] Status-Paket #%u: %s\n", (unsigned)n, kind);
-    hexDump("  Daten", data, len);
+  }else{
+    char tag[48]; snprintf(tag, sizeof tag, "Status #%u id=0x%02x", (unsigned)n, len?data[0]:0);
+    hexDump(tag, data, len);
   }
 #endif
   uint32_t raw;
@@ -474,6 +474,7 @@ void broadcastState(){
   msg += ",\"ip\":\""+WiFi.softAPIP().toString()+"\"";
   msg += ",\"rideDev\":\""+jsonEsc(rideDev)+"\"";
   msg += ",\"hidDev\":\""+jsonEsc(hidDev)+"\"";
+  msg += ",\"bat\":"+String((int)rideBattery);
   msg += "}";
   wsLive.textAll(msg);
 }
@@ -523,6 +524,7 @@ String statusJson(){
   j += ",\"hid\":";      j += hid ? "true":"false";
   j += ",\"rideDev\":\""+jsonEsc(rideDev)+"\"";
   j += ",\"hidDev\":\""+jsonEsc(hidDev)+"\"";
+  j += ",\"bat\":"+String((int)rideBattery);
   j += ",\"ip\":\""+WiFi.softAPIP().toString()+"\"";
   j += ",\"uptime_s\":"+String(millis()/1000);
   j += ",\"heap\":"+String((uint32_t)ESP.getFreeHeap());
@@ -586,6 +588,7 @@ class ClientCB : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient* c, int reason) override {
     Serial.printf("[BLE] getrennt (reason %d). Scanne neu...\n", reason);
     rideConnected=false; rideMeasure=nullptr; rideControl=nullptr; rideSync=nullptr;
+    rideBattery=-1;
     if(mapMutex) xSemaphoreTake(mapMutex, portMAX_DELAY);
     rideDevName="";
     if(mapMutex) xSemaphoreGive(mapMutex);
@@ -642,6 +645,25 @@ bool findZwiftChars(NimBLEClient* c){
   return rideMeasure && rideControl;
 }
 
+// Akkustand über den Standard-Battery-Service (0x180f / 0x2a19): einmal lesen,
+// dann per Notify aktuell halten. Bei Click V2 meldet die linke Click ihren
+// eigenen Stand; ob die rechte (weitergeleitete) einen eigenen liefert, ist offen.
+static void onBatteryNotify(NimBLERemoteCharacteristic* c, uint8_t* data, size_t len, bool isNotify){
+  if(len<1) return;
+  rideBattery = data[0]; stateDirty = true;   // WS-Broadcast aus loop()
+}
+static void setupBattery(NimBLEClient* c){
+  NimBLERemoteService* bs = c->getService(NimBLEUUID((uint16_t)0x180F));
+  NimBLERemoteCharacteristic* bc = bs ? bs->getCharacteristic(NimBLEUUID((uint16_t)0x2A19)) : nullptr;
+  if(!bc){ Serial.println("[BLE] Kein Battery-Service."); return; }
+  if(bc->canRead()){
+    NimBLEAttValue v = bc->readValue();
+    if(v.size()>=1) rideBattery = v.data()[0];
+  }
+  if(bc->canNotify()) bc->subscribe(true, onBatteryNotify);
+  Serial.printf("[BLE] Akku: %d %%\n", (int)rideBattery);
+}
+
 bool connectRide(){
   // Ownership atomar übernehmen: der ScanCB (BLE-Task) könnte foundRide sonst
   // mitten im Connect überschreiben/löschen -> lokal rausziehen und nullen.
@@ -674,6 +696,7 @@ bool connectRide(){
   }
   bool subOk = rideMeasure->subscribe(rideMeasure->canNotify(), onRideNotify);
   Serial.printf("[BLE] subscribe Measure (0002): %s\n", subOk?"ok":"FEHLER");
+  setupBattery(rideClient);
   delay(100);
   // 2) RideOn-Handshake an den Control Point — mit Response nur, wenn unterstützt.
   bool useRsp = rideControl->canWrite();

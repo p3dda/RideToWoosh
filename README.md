@@ -21,6 +21,13 @@ PC, Mac, iPad or Apple TV. No subscription, no PC helper script.*
 > Ride" and "MyWhoosh" are named only descriptively. No brand logos, fonts or assets
 > are used.
 
+> **About this fork:** this fork of [TheInGoF/RideToWoosh](https://github.com/TheInGoF/RideToWoosh)
+> adds adjustments for the **Zwift Click V2**: a fixed connection handshake (characteristics are
+> picked by UUID), a *MyWhoosh · Click V2* preset, and the Click's battery level in the Devices
+> view. Limitation: the firmware connects to one Click only — with a left/right pair, switch on
+> just the **left** one (it forwards the right one's buttons). The handshake fix, the preset and
+> the battery display are proposed upstream in [PR #3](https://github.com/TheInGoF/RideToWoosh/pull/3).
+
 ## Quickstart (TL;DR)
 
 1. **Buy** an ESP32-S3 board with PSRAM (~€10 — see [Hardware](#hardware)). No wiring, no soldering.

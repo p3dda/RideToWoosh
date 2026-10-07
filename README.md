@@ -23,9 +23,9 @@ PC, Mac, iPad or Apple TV. No subscription, no PC helper script.*
 
 > **About this fork:** this fork of [TheInGoF/RideToWoosh](https://github.com/TheInGoF/RideToWoosh)
 > adds adjustments for the **Zwift Click V2**: a fixed connection handshake (characteristics are
-> picked by UUID), a *MyWhoosh · Click V2* preset, and the Click's battery level in the Devices
-> view. Limitation: the firmware connects to one Click only — with a left/right pair, switch on
-> just the **left** one (it forwards the right one's buttons). The handshake fix, the preset and
+> picked by UUID), *MyWhoosh · Click V2* presets, the Click's battery level in the Devices
+> view, an optional status LED, and a **right-Click-only mode** (default) that works without the
+> daily Zwift unlock — see [Zwift Click V2](#zwift-click-v2). The handshake fix, the preset and
 > the battery display are proposed upstream in [PR #3](https://github.com/TheInGoF/RideToWoosh/pull/3).
 
 ## Quickstart (TL;DR)
@@ -168,7 +168,8 @@ Tile-based navigation (no hamburger menus), bilingual **EN / DE**:
   **unsaved-changes** indicator; **Save** writes it permanently to the device.
 - **History** — a rolling log of the last 50 button presses (time · button → key).
 - **Devices** — connected input (Ride, name + address) and output (host address).
-- **Settings** — language switch (stored only in your browser) and project info.
+- **Settings** — language switch (stored only in your browser), Zwift Click V2 mode
+  (*Right Click only* / *Both Clicks*, stored on the device), status LED, and project info.
 
 > Headless check: `GET http://192.168.4.1/status` returns JSON (firmware,
 > connection state, device addresses, IP, uptime, free heap).
@@ -221,6 +222,41 @@ Button mapping is based on the public reverse-engineering work of **MAKINOLO**
   auto-picks the first **notify** characteristic for button data and the first
   **write** one for the `RideOn` handshake — see `findZwiftChars()`.
 
+### Zwift Click V2
+
+A Click V2 pair uses **one** BLE connection: the left Click is the hub and forwards the
+right one's buttons. Since Click V2 firmware 1.1 the left Click needs an **unlock by the
+Zwift app about every 24 h**; without it, it stops sending button events roughly a minute
+after connecting (details: [BikeControl blog](https://bikecontrol.app/blog/zwift-click-v2-with-other-trainer-apps)).
+The firmware therefore offers two modes (*Settings → Zwift Click V2*):
+
+| Mode | Connects to | Buttons | Unlock needed |
+|---|---|---|---|
+| **Right Click only** (default) | right Click only | A, B, Y, Z, + (right paddle) | no |
+| **Both Clicks** | left Click (hub) | left + right incl. both paddles | yes, ~every 24 h |
+
+- **Right Click only** — Zwift Clicks whose advertised device type is not `0x0A` (manufacturer
+  data `4a 09 <type> …`, company ID `0x094A`) are skipped while scanning. The right Click sends
+  its own buttons as normal `0x23` messages. Use the *MyWhoosh · Click V2 R* preset:
+  `+` = harder (`k`), `B` = easier (`i`).
+- **Both Clicks** — to unlock: open the Zwift app (a free account is enough), connect the Click V2
+  for 10–30 s, close Zwift completely. If the right Click is found first and stays silent, the
+  firmware disconnects it after 4 s and connects the other one.
+- Switching the mode is saved immediately and reconnects.
+
+Limitations:
+
+- *Right Click only*: the left paddle and the left buttons are not available.
+- *Right Click only*: other "Zwift Click" devices (e.g. Click V1) have a different device type and
+  are skipped — choose *Both Clicks* for them. The Zwift Ride ("Zwift SF2") is not affected.
+- The Click goes to sleep after about a minute without a press and the connection drops; the next
+  press wakes it and the firmware reconnects (that first press may be lost).
+- Once the left Click has stopped sending buttons (the lock kicked in), reconnecting does not
+  help — only a Click restart (battery out, or wait until it switches itself off) plus a Zwift unlock.
+- Sending `RideOn` periodically as a keep-alive does **not** help: the Click then sends no buttons at all.
+- Recognisable in the serial log (`BLE_DEBUG 1`): when the lock kicks in, the left Click sends a
+  `0xff` status message with `… 10 01 18 84 07 …` (before: `… 10 00 18 0f …`), after that only `0x19`.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -229,6 +265,8 @@ Button mapping is based on the public reverse-engineering work of **MAKINOLO**
 | "Ride connected" never lights | Ride still bonded to the Zwift app | Close Zwift / disconnect BT there so the Ride is free |
 | Connected, but no buttons arrive | Wrong notify characteristic (firmware variant) | Dump characteristics on serial, pick the right one in `findZwiftChars()` |
 | All buttons show permanently pressed | Inverted-logic variant | Change `~raw` to `raw` in `onRideNotify()` |
+| Click V2: buttons stop after ~1 min, LED stays green | Left Click not unlocked by Zwift (24 h) | Use *Right Click only*, or unlock in the Zwift app — see [Zwift Click V2](#zwift-click-v2) |
+| Click V2: nothing connects in *Right Click only* | Right Click asleep | Press a button on the right Click |
 | Keyboard types twice | `write()` press+release vs app expecting hold | Switch to `press()`/`release()` edge logic |
 | Won't boot / crashes | Wrong PSRAM setting or 2nd BLE lib compiled in | Match OPI/QSPI; ensure no Bluedroid BLE lib |
 | Mapping lost after reboot | `cfg` partition missing, or you didn't Save | Flash with `partitions.csv` present; press **Save** |

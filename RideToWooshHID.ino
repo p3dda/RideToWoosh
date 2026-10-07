@@ -105,6 +105,9 @@ static const char* ZW_UUID_SYNC  = "00000004-19ca-4651-86e5-fa29dcdd09d1";
 // so lange keines, gilt die Gegenstelle als "falsche" Click: trennen, Adresse kurz sperren, die andere finden lassen.
 #define SILENT_PEER_MS   4000
 #define SILENT_BAN_MS   20000
+// Zwift-Herstellerdaten im Advertising: 4a 09 <Typ> ...  (Company-ID 0x094A)
+#define ZWIFT_MFR_ID       0x094A
+#define ZWIFT_TYPE_CLICK_R 0x0A   // rechte Click V2 (ermittelt per Adv-Log)
 
 static void hexDump(const char* tag, const uint8_t* d, size_t len){
   // Zeile erst in Puffer bauen, dann EIN Serial-Write (BLE-Task und loop()
@@ -178,6 +181,10 @@ volatile bool     rideConnected = false;
 volatile bool     wantReconnect = false;
 bool              ledOn         = true;     // Web-UI-Schalter (persistent, Default an)
 uint8_t           ledBright     = 20;       // 1..100 %
+// Click V2: nur die rechte Click verbinden. Die linke (Hub) braucht ca. alle 24 h
+// ein "Unlock" durch die Zwift-App, sonst stoppt sie nach ~1 min die Tasten. Die
+// rechte liefert ihre eigenen Tasten (A/B/Y/Z/+) direkt und ohne Unlock.
+bool              clickRightOnly = true;    // Web-UI-Schalter (persistent, Default an)
 volatile uint32_t ledFlashUntil = 0;        // weißer Blitz bei Tastendruck (millis)
 volatile bool     stateDirty    = false;   // Statuswechsel aus BLE-Task -> Broadcast in loop()
 NimBLEAdvertisedDevice* foundRide = nullptr;
@@ -189,6 +196,7 @@ const char*       cfgPartInUse = nullptr;    // "cfg" wenn vorhanden, sonst NULL
 // Forward-Deklarationen
 void broadcastButtons(uint32_t mask);
 void sendLedState(AsyncWebSocketClient* client=nullptr);
+void sendClickState(AsyncWebSocketClient* client=nullptr);
 void broadcastState();
 void sendMapping(AsyncWebSocketClient* client=nullptr);
 
@@ -290,6 +298,20 @@ void saveLedSettings(){
   prefs.putBool("led_on", ledOn);
   prefs.putUChar("led_br", ledBright);
   prefs.end();
+}
+void loadClickSettings(){
+  prefs.begin("zrhid", false, cfgPartInUse);
+  clickRightOnly = prefs.getBool("click_r", true);
+  prefs.end();
+}
+void saveClickSettings(){
+  prefs.begin("zrhid", false, cfgPartInUse);
+  prefs.putBool("click_r", clickRightOnly);
+  prefs.end();
+}
+void sendClickState(AsyncWebSocketClient* client){
+  String m = String("{\"t\":\"click\",\"right\":") + (clickRightOnly?"true":"false") + "}";
+  if(client) client->text(m); else wsLive.textAll(m);
 }
 void sendLedState(AsyncWebSocketClient* client){
   String m = String("{\"t\":\"led\",\"avail\":") + (HAS_LED?"true":"false")
@@ -628,6 +650,7 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
     broadcastState();
     sendMapping(client);
     sendLedState(client);
+    sendClickState(client);
   }else if(type==WS_EVT_DATA){
     AwsFrameInfo* info=(AwsFrameInfo*)arg;
     if(!(info->final && info->index==0 && info->len==len)) return;
@@ -650,6 +673,16 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
       saveLedSettings();
       sendLedState();
     }
+    else if(t=="setclick"){
+      bool v = (field("right")=="1");
+      if(v != clickRightOnly){
+        clickRightOnly = v;
+        saveClickSettings();
+        // Neu auswählen: aktuelle Verbindung trennen, onDisconnect() scannt neu.
+        if(rideConnected && rideClient) rideClient->disconnect();
+      }
+      sendClickState();
+    }
     else if(t=="setmap"){
       setKeyFor(field("btn"), field("key"));
     }
@@ -666,6 +699,18 @@ class ScanCB : public NimBLEScanCallbacks {
        strcasecmp(dev->getAddress().toString().c_str(), banAddr)==0) return;   // stumme Click überspringen
     // Ride heißt im BLE "Zwift SF2" (NICHT "Zwift Ride") -> breit auf "Zwift" matchen.
     if(name.indexOf("Zwift")>=0){
+#if BLE_DEBUG
+      std::string md = dev->getManufacturerData();
+      char mh[64]; size_t k=0;
+      for(size_t i=0;i<md.size() && k+3<sizeof mh;i++) k+=snprintf(mh+k, sizeof mh-k, "%02x ", (uint8_t)md[i]);
+      mh[k]=0;
+      Serial.printf("[BLE] Adv '%s' (%s) mfr: %s\n", name.c_str(), dev->getAddress().toString().c_str(), mh);
+#endif
+      if(clickRightOnly && name.indexOf("Zwift Click")>=0){
+        std::string mf = dev->getManufacturerData();
+        if(mf.size()>=3 && ((uint8_t)mf[0] | ((uint8_t)mf[1]<<8))==ZWIFT_MFR_ID
+           && (uint8_t)mf[2]!=ZWIFT_TYPE_CLICK_R) return;   // linke Click V2 überspringen
+      }
       Serial.printf("[BLE] Ride gefunden: '%s' (%s)\n",
                     name.c_str(), dev->getAddress().toString().c_str());
       if(foundRide){ delete foundRide; }
@@ -830,6 +875,7 @@ void setup(){
   initConfigStore();                    // getrennte 'cfg'-NVS-Partition vorbereiten
   loadMapping();
   loadLedSettings();
+  loadClickSettings();
 
   // 1) BLE-HID-Tastatur starten (Peripheral-Rolle)
   bleKeyboard.begin();
@@ -903,7 +949,8 @@ void loop(){
   updateStatusLed();
 
   // Stumme Gegenstelle (falsche Click des Paares): trennen und die andere suchen.
-  if(rideConnected && rideStatusRx==0 && millis()-rideConnectMs > SILENT_PEER_MS && rideClient){
+  // Im Modus "nur rechte Click" entfällt das: die rechte sendet nie Status-Pakete.
+  if(!clickRightOnly && rideConnected && rideStatusRx==0 && millis()-rideConnectMs > SILENT_PEER_MS && rideClient){
     String a = rideClient->getPeerAddress().toString().c_str();
     Serial.printf("[BLE] %s sendet nichts (vermutlich die weitergeleitete Click) — trenne, suche die andere.\n", a.c_str());
     strncpy(banAddr, a.c_str(), sizeof banAddr - 1); banAddr[sizeof banAddr - 1] = 0;
@@ -911,6 +958,7 @@ void loop(){
     rideStatusRx = 1;           // nur einmal auslösen, bis zum nächsten Connect
     rideClient->disconnect();   // onDisconnect() startet den Scan neu
   }
+
 
   // Sperre abgelaufen: Scan neu starten, sonst meldet der Controller die Click
   // (Duplikatfilter) nie wieder, falls sie die einzige erreichbare ist.

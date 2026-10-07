@@ -17,8 +17,10 @@
 //                   {"t":"btn","mask":<uint32>,"names":[...]}
 //                   {"t":"map","map":{"LEFT_BTN":"a", ...}}
 //                   {"t":"led","avail":bool,"on":bool,"br":1-100}
+//                   {"t":"click","right":bool}
 //   Browser -> ESP: {"t":"setmap","btn":"..","key":".."}  {"t":"getmap"}  {"t":"save"}
 //                   {"t":"setled","on":"0|1","br":"1-100"}   (wird sofort gespeichert)
+//                   {"t":"setclick","right":"0|1"}           (wird sofort gespeichert, verbindet neu)
 #pragma once
 #include <Arduino.h>
 
@@ -317,6 +319,7 @@ const char INDEX_HTML[] PROGMEM = R"HTMLDELIM(
       <span class="pl" data-i18n="presets.label">Quick presets</span>
       <button class="chip" data-preset="MyWhoosh">MyWhoosh</button>
       <button class="chip" data-preset="MyWhooshClickV2">MyWhoosh · Click V2</button>
+      <button class="chip" data-preset="MyWhooshClickV2R">MyWhoosh · Click V2 R</button>
       <button class="chip" data-preset="Zwift">Zwift</button>
     </div>
     <div id="groups"></div>
@@ -364,6 +367,14 @@ const char INDEX_HTML[] PROGMEM = R"HTMLDELIM(
         <button data-lang="de" aria-pressed="false">Deutsch</button>
       </div>
       <div class="note" data-i18n="settings_langHint"></div>
+    </div>
+    <div class="card">
+      <div class="cl" data-i18n="click.t">Zwift Click V2</div>
+      <div class="seg" id="clickSeg" role="group" aria-label="Zwift Click V2" data-i18n-aria="click.t">
+        <button data-clickr="1" aria-pressed="true" data-i18n="click.right">Right Click only</button>
+        <button data-clickr="0" aria-pressed="false" data-i18n="click.both">Both Clicks</button>
+      </div>
+      <div class="note" data-i18n="click.hint"></div>
     </div>
     <div class="card" id="ledCard" hidden>
       <div class="cl" data-i18n="led.t">Status LED</div>
@@ -485,6 +496,9 @@ const PRESETS = {
   MyWhooshClickV2: {SHFT_UP_L_BTN:"i",SHFT_UP_R_BTN:"k",
     LEFT_BTN:"LEFT",RIGHT_BTN:"RIGHT",UP_BTN:"UP",DOWN_BTN:"DOWN",
     Y_BTN:"u",Z_BTN:"2",A_BTN:"7",B_BTN:"3"},
+  // Click V2 nur rechts (kein Zwift-Unlock nötig): + = schwerer (k), B = leichter (i),
+  // wie bei BikeControl. Y/Z/A wie oben.
+  MyWhooshClickV2R: {SHFT_UP_R_BTN:"k",B_BTN:"i",Y_BTN:"u",Z_BTN:"2",A_BTN:"7"},
   Zwift: {SHFT_UP_L_BTN:"UP",SHFT_DN_L_BTN:"DOWN",SHFT_UP_R_BTN:"UP",SHFT_DN_R_BTN:"DOWN",
     LEFT_BTN:"LEFT",RIGHT_BTN:"RIGHT",UP_BTN:"UP",DOWN_BTN:"DOWN",A_BTN:"SPACE"}
 };
@@ -687,7 +701,8 @@ function connect(){
     if(m.t==="state"){ lastState={ride:!!m.ride,hid:!!m.hid,rideDev:m.rideDev||"",hidDev:m.hidDev||"",bat:(typeof m.bat==="number"?m.bat:-1)}; renderState(); }
     else if(m.t==="btn"){ flashButtons(m.names||[]); }
     else if(m.t==="map"){ applyMap(m.map||{}); setDirty(false); }
-    else if(m.t==="led"){ renderLed(m); } };
+    else if(m.t==="led"){ renderLed(m); }
+    else if(m.t==="click"){ renderClick(m); } };
   ws.onclose=()=>{ lastState={ride:false,hid:false,rideDev:"",hidDev:"",bat:-1}; renderState();
     $("banner").classList.add("show"); setTimeout(connect,1200); };
 }
@@ -698,6 +713,10 @@ function renderLed(m){
   document.querySelectorAll("#ledSeg [data-led]").forEach(b=>b.setAttribute("aria-pressed",(b.dataset.led==="1")===!!m.on?"true":"false"));
   if(document.activeElement!==$("ledBr")){ $("ledBr").value=m.br; $("ledBrVal").textContent=m.br+" %"; }
 }
+// ---------- Click V2 mode (settings) ----------
+function renderClick(m){
+  document.querySelectorAll("#clickSeg [data-clickr]").forEach(b=>b.setAttribute("aria-pressed",(b.dataset.clickr==="1")===!!m.right?"true":"false"));
+}
 $("ledBr").addEventListener("input",e=>{ $("ledBrVal").textContent=e.target.value+" %"; });
 $("ledBr").addEventListener("change",e=>send({t:"setled",br:String(e.target.value)}));
 
@@ -706,6 +725,7 @@ document.addEventListener("click",e=>{
   const go=e.target.closest("[data-go]"); if(go){ showView(go.dataset.go); return; }
   const lg=e.target.closest("[data-lang]"); if(lg){ loadLang(lg.dataset.lang); return; }
   const ld=e.target.closest("[data-led]"); if(ld){ send({t:"setled",on:ld.dataset.led}); return; }
+  const cr=e.target.closest("[data-clickr]"); if(cr){ send({t:"setclick",right:cr.dataset.clickr}); return; }
   const pr=e.target.closest("[data-preset]"); if(pr){ applyPreset(pr.dataset.preset); return; }
   if(e.target===$("picker")) closePicker();
 });

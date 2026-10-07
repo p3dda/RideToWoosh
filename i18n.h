@@ -53,6 +53,12 @@ const char LANG_EN_JSON[] PROGMEM = R"I18N(
     "remap": "Open Key Mapping and assign your keys",
     "done": "All set — you're ready to ride."
   },
+  "click": {
+    "t": "Zwift Click V2",
+    "right": "Right Click only",
+    "both": "Both Clicks",
+    "hint": "Right only: works without Zwift, buttons A/B/Y/Z/+. Both: also the left paddle, but the Click V2 must be unlocked in the Zwift app about every 24 h (connect for 10–30 s), otherwise buttons stop after ~1 min. Click V1: choose Both. Reconnects immediately."
+  },
   "led": {
     "t": "Status LED",
     "on": "On",
@@ -156,6 +162,12 @@ const char LANG_DE_JSON[] PROGMEM = R"I18N(
     "ride": "Ride einschalten (vorher in der Zwift-App trennen)",
     "remap": "Tastenbelegung öffnen und Tasten zuweisen",
     "done": "Alles bereit — auf geht's."
+  },
+  "click": {
+    "t": "Zwift Click V2",
+    "right": "Nur rechte Click",
+    "both": "Beide Clicks",
+    "hint": "Nur rechts: funktioniert ohne Zwift, Tasten A/B/Y/Z/+. Beide: auch das linke Paddle, aber die Click V2 muss etwa alle 24 h in der Zwift-App entsperrt werden (10–30 s verbinden), sonst stoppen die Tasten nach ~1 min. Click V1: Beide wählen. Verbindet sofort neu."
   },
   "led": {
     "t": "Status-LED",
